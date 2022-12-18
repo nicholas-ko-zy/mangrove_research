@@ -1,0 +1,270 @@
+---
+title: "Mangrove Exploration -- Misc. Exploration"
+author: Nicholas Ko
+output: 
+ html_document:
+    toc : TRUE
+    toc_float: TRUE
+    number_sections: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Background
+
+This Rmd file contains miscellaneous data exploration and plots that I did in my spare time. 
+
+**load libraries**
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(heatmaply)
+library(wesanderson)
+library(ggpubr)
+```
+
+
+**load data**
+```{r}
+species <- read_csv("processed_data/species.csv")
+tree_probs <- read_csv("processed_data/tree_probs_new.csv")
+```
+
+
+# Misc. Exploration: 
+
+**Load background objects**
+
+The code for these objects is taken from the file `mangrove_exploration.Rmd`
+
+```{r}
+sp_rank <- species %>%
+  rename(species = spp) %>%
+  select(species, est_median) %>%
+  filter(!species %in% c("LURA", "SCHY")) %>%
+  #create column with ranked est_median
+  mutate(rank = rank(est_median)) %>%
+  #arrange in ascending order
+  arrange(rank)
+
+
+sp_abundance_2 <- tree_probs %>% 
+  group_by(treeid, plot, spp_orig) %>%
+  summarise(n_trees = n()) %>%
+  select(-n_trees) %>%
+  #remove unwanted species, low count and random species
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  group_by(plot, spp_orig) %>% 
+  summarise(n_tree = n()) %>%
+  #pivot
+  pivot_wider(
+  names_from = spp_orig, 
+  values_from = n_tree,
+  values_fill = 0
+) %>%
+  #calculate sum for each row
+  rowwise() %>%
+  #sum total number of trees per plot
+  mutate(total_trees = sum(c_across(AVOF:EXAG))) %>%
+  #repivot, now with 0 added to values fill
+  pivot_longer(
+  cols = !c(plot,total_trees),
+  names_to = "species",
+  values_to = "n_trees") %>%
+  #add elevation ranking
+  left_join(sp_rank) %>%
+  ungroup()
+```
+
+## Species Heat map
+
+Rank species according to elevation
+
+```{r}
+elevation_rank <- species %>%
+ # select(species, nr_trees) %>%
+  left_join(sp_abundance_2) %>%
+  filter(!species %in% c("LURA", "SCHY")) %>%
+  rename(trees_per_species = nr_trees) %>%
+  relocate(plot, .before = species) %>%
+  arrange(plot) %>%
+  mutate(species_contribution = 100*(n_trees/trees_per_species)) %>%
+  mutate(species_contribution = round(species_contribution, digits = 1)) %>%
+  relocate(plot, .before = nr_plots) %>%
+  relocate(n_trees, .after = nr_plots) %>%
+  relocate(species_contribution, .after = trees_per_species) %>%
+  relocate(rank, .after = spp) %>%
+  arrange(spp) %>%
+  arrange(rank) %>%
+  select(-species) %>%
+  ungroup()
+
+#species_contribution col: proportion of trees represented by a species at plot level
+```
+
+First 20 rows of `elevation_rank` data frame
+
+```{r fig.height = 7, fig.width = 15, include = FALSE}
+elev_rank_ggtt <- elevation_rank
+  
+elev_rank_ggtt[,-1] <- round(elev_rank_ggtt[,-1],1)
+
+ggtexttable(elev_rank_ggtt[1:20,], 
+            theme = ttheme("light",
+                           base_size = 10.5, 
+                           padding = unit(c(5, 4),
+                                          "mm"))) %>%
+  tab_add_title(text = "elevation_rank data frame \n (first 20 rows)")
+
+rm(elev_rank_ggtt)
+```
+
+
+### data frame
+
+```{r}
+#heatmap data frame
+heatmap_df <- tree_probs %>%
+  filter(!spp_orig %in% c("LURA", "SCHY", "random")) %>%
+  group_by(treeid,
+           spp_orig,
+           elev_bin) %>%
+  #x = number of treeid replicates, will remove later
+  summarise(x = n()) %>%
+  arrange(treeid) %>%
+  select(treeid, spp_orig, elev_bin) %>%
+  group_by(spp_orig, elev_bin) %>%
+  summarise(tree_per_bin = n()) %>%
+  rename(species = spp_orig) %>%
+  ungroup()
+
+```
+
+### ggplot2
+
+```{r}
+#species heatmap with ggplot2
+ggplot(heatmap_df, aes(x = species, 
+                                 y = factor(elev_bin), 
+                                 fill = tree_per_bin)) +
+  #use geom_tile for heatmap, look into heatmap.2() function
+  geom_tile() +
+  coord_flip() + 
+  labs(x = "Species",
+       #issue: too many elevation bins, 431 of them
+       y = "Elevation Bin",
+       fill = "Species Abundance") + 
+  scale_fill_gradient(low="white", high="red") + 
+  theme_classic()
+
+#ggplot2 heat map ver 2.0
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+heatmap_v2 <- ggplot(heatmap_df, aes(x = elev_bin, y = species, fill = tree_per_bin)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours = pal) + 
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) + 
+  coord_equal() +
+  theme_classic()
+```
+
+```{r export ggplot2 heatmap, eval=FALSE, include=FALSE}
+#export v2.0 to pdf
+ggexport(heatmap_v2, filename="heatmap_v2.pdf", width = 250, height = 10)
+```
+
+
+Using heatmaply
+```{r eval=FALSE, include=FALSE}
+heatmap_df2 <- heatmap_df %>% 
+  pivot_wider(names_from = elev_bin, 
+              values_from = tree_per_bin,
+              values_fill = 0)
+
+#species heat map with heatmaply
+heatmaply(heatmap_df2, 
+        dendrogram = "none",
+        col = heat,
+        xlab = "Elevation bin", 
+        ylab = "Species")
+```
+
+
+
+
+```{r junk code, eval=FALSE, include=FALSE}
++
+  labs(x = "Plot", 
+       y = "Number of trees",
+       fill = "Species") + 
+  coord_flip() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal") +
+  guides(fill=guide_legend(ncol = 16,byrow=TRUE)) 
+```
+
+
+## Plot vs elevation rank (w/ abundance)
+
+```{r}
+#exploratory bar plot of distribution of species per plot
+sp_plot <- ggplot(sp_abundance_2, aes(x = factor(plot), 
+                                      y = n_trees, 
+                                      #code below orders the plant species based on the elevation rank
+                                      fill = fct_reorder(species, rank, .desc = FALSE))) +
+  geom_col() +
+  labs(x = "Plot", 
+       y = "Number of trees",
+       fill = "Species") + 
+  coord_flip() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal") +
+  guides(fill=guide_legend(ncol = 16,byrow=TRUE)) 
+
+sp_plot
+
+```
+
+
+
+```{r fig.height = 20, fig.width = 20}
+#use species data frame which includes median elevation component
+
+order_plot <- ggplot(species[-c(1,2),], aes(x = est_median, y = reorder(spp, est_median))) +
+  geom_point(size = 3, col = "blue") +  # Use a larger dot
+  theme_bw() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(colour = "grey60", linetype = "dashed"),
+    axis.text.x = element_text(size = 20),
+    axis.text.y = element_text(size = 20),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    plot.title = element_text(size = 20),
+  ) +
+  labs(x = "Estimated Median Elevation",
+       y = "Species of Tree") +
+  ggtitle("Order of trees along elevation gradient") +
+  scale_x_continuous(breaks=seq(0,400,10))
+
+order_plot
+
+```
+
+### Export plot
+
+```{r eval = FALSE}
+multi.page <- ggarrange(order_plot,
+                        sp_plot,
+                        #specify number of rows and columns
+                        nrow=2, ncol=1) 
+multi.page[[1]] 
+
+ggexport(multi.page, filename="elevation_plot.pdf", width = 16, height = 20)
+
+ggexport(order_plot, filename="elev_by_sp.pdf", width = 16, height = 12)
+```
+

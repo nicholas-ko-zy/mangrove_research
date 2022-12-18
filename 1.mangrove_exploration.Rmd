@@ -1,0 +1,1288 @@
+---
+title: "Exploring Species Variation"
+author: Nicholas Ko
+output: 
+ html_document:
+    toc : TRUE
+    toc_float: TRUE
+    number_sections: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+NOTE: USE `set.seed(5)` for all random processes.
+
+# Background
+
+This Rmd file is the longest of a set of 4 files. 
+
+1. `mangrove_exploration.Rmd`
+
+2. `heatmap.Rmd`
+
+3. `nmds.Rmd`
+
+4. `misc_exploration.Rmd`
+
+This R notebook is the initial exploration file, files (2) and (3) are derived from the code here. They explore the more. 
+
+This notebook can be split into three parts.
+
+1. NMDS Exploration (Section 1)
+
+2. Heat Map Exploration (Section 2&3)
+
+3. Miscellaneous Exploration (Section 4)
+
+More explanation within each section.
+
+
+**load libraries**
+
+```{r}
+library(dplyr)
+library(vegan)
+library(tidyverse)
+library(moderndive)
+library(ggpmisc)
+library(ggrepel)
+library(ggpubr)
+library(hrbrthemes)
+library(heatmaply)
+library(wesanderson)
+library(usedist)
+library(gridExtra)
+library(gridBase)
+library(png)
+library(egg)
+library(cowplot)
+```
+
+
+**load data**
+
+```{r}
+fitted_probdens <- read_csv("processed_data/fitted_probdens.csv")
+inventory <- read_csv("processed_data/inventory.csv")
+species <- read_csv("processed_data/species.csv")
+tree_probs <- read_csv("processed_data/tree_probs_new.csv")
+
+n_plots <- inventory %>%
+  group_by(plot) %>%
+  summarise(n_trees = n()) %>%
+  ungroup()
+```
+
+# NMDS Exploration
+
+In this section, I created
+
+1. Species Abundance Matrix `abundance_matrix `
+
+## Create species abundance matrix
+
+```{r}
+abundance_matrix <-  tree_probs %>% 
+  #group_by + summarise() gives repeated values (16) for each treeid
+  group_by(treeid, plot, spp_orig) %>%
+  summarise(n_trees = n()) %>%
+  #remove repeated values
+  select(-n_trees) %>%
+  #remove unwanted species, low count and random species
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  #code below gives number of trees per species per plot
+  group_by(plot, spp_orig) %>% 
+  summarise(n_tree = n()) %>%
+  #pivot wider. cols are not species and rows are plots, 
+  #plots with 0 counts of a species will show the value '0'
+  pivot_wider(
+  names_from = spp_orig, 
+  values_from = n_tree,
+  values_fill = 0
+) %>%
+  ungroup() %>%
+  select(-plot)
+
+#change index numbers of abundance matrix to match plot level numbers
+
+rownames(abundance_matrix) <- n_plots$plot
+
+```
+
+## metaMDS()
+```{r}
+#new ordination graph 21/6/21
+set.seed(5)
+ord <- abundance_matrix %>%
+  metaMDS(., distance="jaccard", k=3, trymax=50, trace=F) 
+
+#highlight up to here for nmds plot
+ord
+plot(ord, type = "t", main = "NMDS plot with jaccard index")
+legend("topleft", "stress = 0.065", bty = "n", cex = 1)
+
+#question: why won't the site numbers reflect the index numbers of the 'abundance_matrix' data frame?
+```
+
+
+## Vegdist
+```{r}
+#preview pairwise dissimilarity in console
+vegdist(abundance_matrix, method = "jaccard")
+
+#I had to convert it to a matrix first then data frame because it won't allow me to convert it to a dataframe from vegdist() right away. 
+dissim_obs <- as.data.frame(as.matrix(vegdist(abundance_matrix, method = "jaccard"))) 
+
+rownames(dissim_obs) <- n_plots$plot
+colnames(dissim_obs) <- rownames(dissim_obs)
+```
+
+
+
+## Plot NDMS in `ggplot2` (OLD)
+
+```{r eval=FALSE, include=FALSE}
+
+#copies from w10 in class
+#data frame below gives the xzy coordinates for the NMDS plot
+plot_level <- elev_nmds %>% 
+  #choices: ordination axes(numer of dim?), if missing, default method returns all axes
+  scores(., choices = c(1:3), display=c("sites")) %>%
+  # scores() produces a named matrix, not a dataframe (compare in your environment)
+  # So we first need to convert the output to a dataframe. 
+  data.frame(.) %>%
+  bind_cols(plot_level, .)
+
+
+#using ggplot2 to visualise the nmds
+ggplot(plot_level, aes(x = NMDS1, y = NMDS2)) +
+  geom_point()
+```
+
+# Heat map : Modelled Population
+
+`create_df`: Function that I use to replicate sample populations. I will plug this into the map_df() function, where the arguments are "map_df(# of repetitions, ~function)"
+
+`sample_pop`: Data frame that contains 100 sample populations.
+
+`elev` : Data frame that contains observed and simulated elevation. Simulated elevation taken as median elevation of 100 samples. 
+
+## Data frame
+
+Create Function to use in map_df()
+```{r}
+
+#create a function to replicate tree_probs data frame
+create_df <- function(x) {
+  #create a data frame called pop_sim from data frame 'x'
+  pop_sim <- as.data.frame(x %>%
+                             #sample one tree per tree id, weighted by 'est_prob'
+  group_by(treeid) %>%
+  #slice_sample, check replacement argument
+  #OR WEIGHTED BY SPECIES ABUNDANCE
+  #Elevation preference x species abundance should give closer abundance to observed
+  #twe does the elevation weights give us the abundance of the observed communities. Significance of elevation factor
+  #three things to weigh sample - relative abundance, elevation, elevation x  relative abundance
+  sample_n(size = 1, weight = est_prob) %>%
+  ungroup())
+  
+}
+
+```
+
+Create 100 dataframes, stacked on top of one another
+```{r}
+#set seed for reproducibility.
+set.seed(5)
+
+#use map_df to replicate tree_probs
+#add column to id the replicate number of dataframe, .id argument
+sample_pop <- map_df(1:100, ~create_df(tree_probs), .id = "n_trial") %>%
+  #remove low abundance species and random points
+  filter(!spp_orig %in% c("LURA","SCHY", "random"))
+
+```
+
+
+Use data wrangling to get a data frame with observed and simulated elevations.
+
+Step 1: Get observed elevation
+```{r}
+#create data frame with observed median elevation per species
+elev_obs <- tree_probs %>%
+  group_by(spp_orig) %>%
+  #observed average elevation per species
+  summarise(avg_elev_obs = median(rel_elev)) %>%
+  #remove 'random' and low count species
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  #rename species column
+  rename(species = spp_orig) %>%
+  ungroup()
+```
+
+Step 2: Get simulated elevation
+```{r}
+#create data frame with simulated median elevation per species
+elev_sim <- sample_pop %>%
+  group_by(spp_prob) %>%
+  #simulated average elevation per species
+  summarise(avg_elev_sim = median(rel_elev)) %>%
+  rename(species = spp_prob) %>%
+  ungroup()
+```
+
+Step 3: Join observed and simulated elevation in one data frame, remove individual dataframes
+
+```{r}
+#join elev_sim and elev_obs data frame together
+elev <- elev_obs %>%
+  left_join(elev_sim)
+
+#remove data frames
+rm(elev_obs, elev_sim)
+```
+
+
+## plot elevation distribution
+
+```{r}
+#I will use this plot formula code to get the linear equation, see "stat_poly_eq()" funciton in ggplot code
+plot_formula <- y ~ x
+
+#plot 
+simulation_plot <- ggplot(elev, aes(x = avg_elev_obs, y = avg_elev_sim)) +
+  geom_point() +
+  #labels
+  labs(x = "Observed median elevation (cm)",
+       y = "Estimated median elevation (cm)") + 
+  ggtitle("obs vs est median elevation (cm)") +
+  theme_bw() +
+  stat_smooth(method = "lm", se = FALSE, formula = plot_formula) +
+  # add a formula in the graph showing R^2, don't know what it does
+  stat_poly_eq(formula = plot_formula, 
+                aes(label = paste(..eq.label.., ..rr.label.., sep = "~~~")), 
+                parse = TRUE) +
+  #space out the species text on the graph
+  geom_text_repel(aes(label = species))
+
+simulation_plot
+
+```
+
+```{r export linear regression, eval=FALSE, include=FALSE}
+ggexport(simulation_plot, filename="linear_reg.pdf", width = 10, height = 10)
+```
+
+
+The graph shows that for every 1cm increase in observed median elevation, there is a 0.938cm increase in estimated median elevation. Since 1cm and 0.938cm are quite close to each other, we can say that the model predicts the actual data quite well. 
+
+
+
+## fit regression model
+
+```{r}
+# Fit regression model:
+elev_model <- lm(avg_elev_sim ~ avg_elev_obs, data = elev)
+# Get regression table:
+get_regression_table(elev_model)
+
+#summary of model: get r^2, p_value etc.
+summary(elev_model)
+```
+
+p-value is close to 0, which means that I am 95% sure this model is statistically significant. 
+
+## dissimilarity by plot
+
+```{r}
+#compare species abundance of tree_probs with sample_pop
+
+#ranking species based on est_median elevation
+sp_rank <- species %>%
+  rename(species = spp) %>%
+  select(species, est_median) %>%
+  filter(!species %in% c("LURA", "SCHY")) %>%
+  #create column with ranked est_median
+  mutate(rank = rank(est_median)) %>%
+  #arrange in ascending order
+  arrange(rank)
+  
+#working abundance data frame 14/6/2021
+sp_abundance_2 <- tree_probs %>% 
+  group_by(treeid, plot, spp_orig) %>%
+  summarise(n_trees = n()) %>%
+  select(-n_trees) %>%
+  #remove unwanted species, low count and random species
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  group_by(plot, spp_orig) %>% 
+  summarise(n_tree = n()) %>%
+  #pivot
+  pivot_wider(
+  names_from = spp_orig, 
+  values_from = n_tree,
+  values_fill = 0
+) %>%
+  #calculate sum for each row
+  rowwise() %>%
+  #sum total number of trees per plot
+  mutate(total_trees = sum(c_across(AVOF:EXAG))) %>%
+  #repivot, now with 0 added to values fill
+  pivot_longer(
+  cols = !c(plot,total_trees),
+  names_to = "species",
+  values_to = "n_trees") %>%
+  #add elevation ranking
+  left_join(sp_rank) %>%
+  ungroup()
+
+#number trees per species per plot
+sp_abundance_2 %>%
+  mutate(perc_rep = n_trees/total_trees)
+
+tree_probs %>% 
+  group_by(treeid, plot, spp_orig) %>%
+  summarise(n_trees = n()) %>%
+  select(-n_trees) %>%
+  group_by(plot, spp_orig) %>%
+  summarise(x = n()) %>%
+  group_by(plot) %>%
+  summarise(n_species = n()) %>%
+  ungroup()
+
+species <- species %>%
+  left_join(sp_rank)
+  
+```
+
+Remove objects
+
+```{r}
+remove(sp_rank)
+```
+
+
+# Heat map: Dissimilarity 
+
+Summary of work: In this section I will create three simulated populations of the observed trees. These three simulated populations will be generated by different set of probabilities. The aim is to compare **pairwise dissimilarity in species abundance** between the simulated plots with the observed plots 
+
+The three probabilities are:
+
+i.   Abundance And Elevation 
+ii.  Abundance Per Plot
+iii. Abundance Across All Plots
+
+There are notes on how each of the probabilities are calculated at the start of each subsection. 
+
+
+*Simulate pair-wise dissimilarity*
+
+For each iteration, I will need to create: 
+
+1. Species abundance matrix (change row and col names)
+
+2. Run `vegdist()` on that matrix
+
+3. Calculate difference between simulated matrix and observed data using the formula (observed - simulated)
+
+4. Store this in a big data frame (1200 x 1200), since there are 12 unique plots
+
+## Simulation 1 : Elevation & Abundance
+
+For this simulation, I will use the `est_prob` column from the `tree_probs` data frame. (Can add more explanation of how `est_prob` is derived)
+
+**Elevation & abundance probability**
+
+```{r demo data frames for explanation, include=FALSE}
+set.seed(5)
+demo_sp_abundance_sim <- as.data.frame(tree_probs %>%
+  #remove low abundance and random species
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  #code below tells R to generate 1 random species for every unique treeid, weighted by the column 'est_prob' which is the elevation x  abundance probability
+  group_by(treeid) %>%
+  sample_n(size = 1, weight = est_prob) %>%
+  ungroup() %>% 
+  #keep the following columns
+  select(treeid, plot, spp_prob) %>%
+  #code below counts the number of trees per species per plot per simulation
+  group_by(plot, spp_prob) %>% 
+  summarise(n_tree = n()) %>%
+  #pivot to show species as columns and plot as rows
+  pivot_wider(
+  names_from = spp_prob, 
+  values_from = n_tree,
+  values_fill = 0
+) %>%
+  ungroup() %>%
+  select(-plot))
+
+demo_sim_dissim <- as.data.frame(as.matrix(vegdist(demo_sp_abundance_sim, method = "jaccard")))
+
+rownames(demo_sp_abundance_sim) <- n_plots$plot
+
+rownames(demo_sim_dissim) <- n_plots$plot
+colnames(demo_sim_dissim) <- rownames(demo_sim_dissim)
+
+```
+
+Objects used in function:
+
+`dissim_func` : Function I created to do the 4-step process listed above
+
+1. `sp_abundance_sim` : Data frame created within `dissim_func`. It is a species abundance matrix where the columns are species and rows are plots. Each cell shows the count of trees per species per plot. 
+
+```{r fig.width = 10, fig.height = 5, echo=FALSE}
+#copied from https://rpkgs.datanovia.com/ggpubr/reference/ggtexttable.html
+ggtexttable(demo_sp_abundance_sim, theme = ttheme("light",
+                                                  base_size = 13,
+                                                  padding = unit(c(2.5, 4),
+                                                                 "mm"))) %>%
+  tab_add_title(text = "sp_abundance_sim data frame")
+
+
+```
+
+2. `sim_dissim` : Calculate relative dissimilarity using `vegdist()` function from `vegan` package
+
+```{r echo=FALSE}
+ggtexttable(round(demo_sim_dissim, digits = 3), theme = ttheme("light",
+                                            base_size = 8,
+                                            padding = unit(c(5, 5),
+                                                           "mm"))) %>%
+  tab_add_title(text = "sim_abundance data frame")
+```
+
+```{r echo=FALSE}
+rm(demo_sim_dissim, demo_sp_abundance_sim)
+```
+
+
+### Function used in map_df()
+
+The chunk below contains the function I used in the `map_df()` function. The `map_df()` function is used to generate multiple data frames stacked on top of each other. See code for `map_df()` under section titled "Data frame".
+
+```{r}
+#set.seed for consistent randomness since we have a sample_n() function below
+set.seed(5)
+
+#create a function to replicate species abundance matrix ONCE
+# data frame 'x' to be replaced with 'tree_probs', see next chunk
+dissim_func <- function(x) {
+  #create a new data frame based on data wrangling on data frame 'x' - which I will replace with tree_probs
+  sp_abundance_sim <- as.data.frame(x %>%
+  #remove low abundance and random species
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  #code below tells R to generate 1 random species for every unique treeid, weighted by the column 'est_prob' which is the elevation x  abundance probability
+  group_by(treeid) %>%
+  sample_n(size = 1, weight = est_prob) %>%
+  ungroup() %>% 
+  #keep the following columns
+  select(treeid, plot, spp_prob) %>%
+  #code below counts the number of trees per species per plot per simulation
+  group_by(plot, spp_prob) %>% 
+  summarise(n_tree = n()) %>%
+  #pivot to show species as columns and plot as rows
+  pivot_wider(
+  names_from = spp_prob, 
+  values_from = n_tree,
+  values_fill = 0
+) %>%
+  ungroup() %>%
+  select(-plot))
+  
+#sp_abundance_sim is an species-abundance matrix where  
+  
+  sim_dissim <- as.data.frame(as.matrix(vegdist(sp_abundance_sim, method = "jaccard"))) 
+
+#name row/col names the same as plot numbers instead of normal running numbers
+  #reason: since there are missing plots between 11 and 15
+rownames(sim_dissim) <- n_plots$plot
+colnames(sim_dissim) <- rownames(sim_dissim)
+
+#subtract data frames: observed - simulated, same as residual formula
+dissim_obs - sim_dissim
+}
+```
+
+### Data frame
+
+I aim to create a large data frame (1200 x 1200) that contains 100 iterations of the `dissim_func`. 
+
+
+Create 100 dataframes, stacked on top of one another
+
+```{r}
+#set seed for reproducibility.
+set.seed(5)
+
+#use map_df to replicate tree_probs
+#add column to id the replicate number of dataframe, .id argument
+#data frame contains the difference between the observed and simulation dissimilarity index. The smaller the difference, the better the simulation predicts the observed.
+dissim_difference <- map_df(1:100, ~dissim_func(tree_probs), .id = "n_trial")
+```
+
+The difference in relative dissimilarity (observed - simulated) is stored in a data frame called `dissim_difference`
+
+Note that the row numbers on the extreme left contain both the running number of rows and the plot numbers that correspond with the `vegdist()` matrix output. 
+
+```{r fig.width = 10, fig.height = 6.5, echo = FALSE}
+dissim_difference$n_trial <- as.numeric(dissim_difference$n_trial)
+
+ggtexttable(round(dissim_difference[1:20,], digits = 3), 
+            theme = ttheme("light",
+                           base_size = 10.5, 
+                           padding = unit(c(5, 4),
+                                          "mm"))) %>%
+  tab_add_title(text = "dissim_difference data frame \n (first 20 rows)")
+
+```
+
+
+
+### Median Difference
+
+At this stage we currently have 100 data frames stacked on top of each other in an object called `dissim_difference` Each cell contains the [observed - simulated] `vegdist()` value. I want to reduce the 100 data frames to 1 summary data frame. The summary function I will use is median. The code below gives me one data frame where each value is the median of all the trials.  
+
+I broke down the procedure to 4 steps in order to solve some data wrangling issues, explanations provided. 
+
+ <font size="3"> **Step 1**: Create function + `map_df()` </font>
+
+The `dissim_difference` data frame does not currently have a column to indicate the plot number. I will create this column manually.
+
+To do so, I will use a function which contains the code to make 1 data frame that contains all 12 plot numbers. I will use `map_df()` to create 100 replicates of that data frame. 
+
+```{r}
+#create a function that creates a data frame of the plot numbers
+n_plot_function <- function(x) {
+  plot_num <- c(1:11, 15)
+as.data.frame(plot_num)
+}
+
+#use mapdf() to create 100 copies of the plot_num dataframe, stacked on top of each other.
+plot_rep <- map_df(1:100, ~n_plot_function())
+
+
+
+```
+
+`plot_rep`: A data frame which contains running number of plots 1-15 (total of 12 plots), 100 times. (I may have to change this code to ensure that when I change the number of trials, I don't have to change this step)
+
+```{r fig,width = 1, fig.height = 5, echo = FALSE}
+ggtexttable(as.data.frame(plot_rep[1:16,]), 
+            rows = c(1:16),
+            theme = ttheme("light",
+                           base_size = 10, 
+                           padding = unit(c(50, 3),
+                                          "mm"))) %>%
+  tab_add_title(text = "plot_rep data frame \n first 16 rows")
+
+# how to make row names appear?
+
+```
+
+
+
+<font size="3"> **Step 2**: `cbind()`</font>
+
+I will join the `plot_num` data frame with the `dissim_difference` data frame. 
+
+```{r}
+#cbind the 100 copies of the plot numbers into dissim_difference dataframe to id each row by its plot number
+dissim_difference <- dissim_difference %>%
+  #cbind() grafts the plot numbers to the right of the dissim df
+  cbind(plot = plot_rep$plot) %>%
+  #code below relocates the plot number columns to the left for readibility
+  relocate(plot, .after = n_trial)
+```
+
+`dissim_difference` after `cbind` to add plot numbers.
+
+```{r fig.height = 7, fig.width = 10, echo = FALSE}
+ggtexttable(round(dissim_difference[1:20,], digits = 3), 
+            theme = ttheme("light",
+                           base_size = 10.5, 
+                           padding = unit(c(5, 4),
+                                          "mm"))) %>%
+  tab_add_title(text = "dissim_difference data frame \n (first 20 rows)")
+```
+
+<font size="3"> **Step 3**: `aggregate`</font>
+
+I now have all pairwise dissimilarity differences in one big data frame (1200 rows). I want to calculate the median difference in dissimilarity for each unique combination of plots. 
+
+I will use the the `aggregate` function to achieve this. 
+
+```{r}
+dissim_diff_median <- aggregate(dissim_difference, 
+          by = list(dissim_difference$plot),
+          FUN = median) %>%
+  select(-Group.1, -n_trial)
+
+```
+
+`dissim_diff_median`: Summary data frame of the difference in vegdist() values between observed and simulated populations. (summary function - Median)
+
+```{r echo = FALSE}
+ggtexttable(round(dissim_diff_median, digits = 3), 
+            rows = NULL,
+            theme = ttheme("light",
+                           base_size = 10, 
+                           padding = unit(c(4, 4),
+                                          "mm"))) %>%
+  tab_add_title(text = "dissim_diff_median data frame \n (rounded to 3 decimals)")
+```
+
+
+<font size="3"> **Step 4**:  `pivot_longer`</font>
+
+To facilitate plotting the heatmap, I need to convert the wide format df to a long format data frame. In other words, I need to make the columns (currently plot numbers) into a single column titled, "plot"
+
+```{r}
+dissim_diff_median <- dissim_diff_median %>%
+  #since I will have two columns called plot (x & y axis), I will name each plot_1 and plot_2
+  rename(plot_1 = plot) %>%
+  pivot_longer(!plot_1, names_to = "plot_2", values_to = "dissim_diff") %>%
+  #change plot_2 from 'chr' to 'num'
+  mutate(plot_2 = as.numeric(plot_2))
+
+```
+
+`dissim_diff_median` pivtor longer transformation to aid ggplot plotting.
+
+```{r fig.height = 6 ,echo = FALSE}
+ggtexttable(round(dissim_diff_median[1:20,], digits = 3), 
+            theme = ttheme("light",
+                           base_size = 10, 
+                           padding = unit(c(10, 3.5),
+                                          "mm"))) %>%
+  tab_add_title(text = "dissim_diff_median data frame \n (first 20 rows)")
+```
+
+
+
+### Heatmap (Elev & Abundace)
+
+Heat map shows the difference in vegdist values between the simulated and observed values.
+
+Blue = Low Difference
+
+Orange = Medium Difference
+
+Red = High Difference
+
+The simulation that best represents the observed/real data would be all blue. 
+
+```{r}
+#palette code copied from https://www.datanovia.com/en/blog/top-r-color-palettes-to-know-for-great-data-visualization/
+
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+
+
+dissim_heatmap <- ggplot(dissim_diff_median, 
+                         aes(x = factor(plot_1), 
+                             y = factor(plot_2), 
+                             fill = dissim_diff)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours = pal) + 
+  theme_classic() +
+  labs(x = "Plot",
+       y = "Plot",
+       fill = "Difference in dissimilarity") +
+  ggtitle("Difference in dissimilarity for observed and simulated plots \n (Probability Weighted by Elevation & Abundance)") +
+  #all theme adjustments are to change the text size for legibility
+  theme(axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_text(size = 20),
+        plot.title = element_text(size = 20),
+        legend.text = element_text(size = 20),
+        legend.title = element_text(size = 20))
+```
+```{r fig.width = 8}
+dissim_heatmap
+```
+
+
+Remove unneccesary objects
+
+```{r}
+#remove(plot_rep)
+```
+
+Questions:
+
+i.  What does the range of difference 0-0.4 mean? Is it significant?
+ii. Why is plot 10 so dissimilar from the other plots? 
+
+## Simulation 2: Abundance Per Plot 
+
+Almost a 1-for-1 repeat of the steps used in "elevation & abundance probability", starting from step 2 -- `cbind`
+
+Run the same loop to compare dissimilarity difference.
+
+See the explanation below this chunk for how Simulation 2 probability is calculated.
+
+```{r}
+#didn't annotate much since I redid the same steps, the only changes being the calculation of abundance per plot. 
+abund_plot_sp <- inventory %>%
+  filter(type == "tree",
+         !spp %in% c("LURA", "SCHY", "random")) %>%
+  select(plot, spp) %>%
+  group_by(plot, spp) %>%
+  summarise(tree_per_sp = n()) %>%
+  left_join(n_plots) %>%
+  mutate(est_prob = tree_per_sp/n_trees) %>%
+  ungroup
+
+```
+
+`abund_plot_sp`: `est_prob` is calculated as `tree_per_sp` divded by `n_trees`.
+
+```{r fig.height = 6 ,echo = FALSE}
+ggtexttable(abund_plot_sp[1:20,], 
+            theme = ttheme("light",
+                           base_size = 10, 
+                           padding = unit(c(10, 3.5),
+                                          "mm"))) %>%
+  tab_add_title(text = "abund_plot_sp data frame \n (first 20 rows)")
+```
+
+
+### Data frame
+
+In this section, I will replace the `est_probs` in the `tree_probs` data frame with this new `est_probs` column. I preserved the column name so that the new data frame will run in the `dissim_func` function.
+
+The new data frame will be called `abundance_prob`.
+
+```{r}
+abundance_prob <- inventory %>%
+  filter(type == "tree",
+         !spp %in% c("LURA", "SCHY", "random")) %>%
+  select(plot, spp) %>%
+  group_by(plot, spp) %>%
+  summarise(tree_per_sp = n()) %>%
+  left_join(n_plots) %>%
+  mutate(abund_prob = tree_per_sp/n_trees) %>%
+  select(-tree_per_sp, -n_trees) %>%
+  #pivot wider fills up missing species in each plot with a value of zero. 
+  #this will be useful when I left join into tree_probs to replace the est_prob column
+  pivot_wider(
+  names_from = spp, 
+  values_from = abund_prob,
+  values_fill = 0) %>%
+  pivot_longer(!"plot", 
+               names_to = "spp_prob",
+               values_to = "abund_prob") %>%
+  ungroup()
+
+#pipe below essentially left_joins the new probability into the tree_probs data frame. The est_prob is updated with the abundance per plot probability. The rest of the code is just some cleaning.
+abund_prob <- tree_probs %>%
+  select(-est_prob) %>%
+  left_join(abundance_prob) %>%
+  rename(est_prob = abund_prob)
+
+rm(abundance_prob)
+```
+
+Create 100 data frames, stacked on top of each other with `map_df()`.
+```{r}
+set.seed(5)
+
+dissim_diff_abund <- map_df(1:100, ~dissim_func(abund_prob), .id = "n_trial")
+```
+
+### Median Difference
+
+Here I will repeat the steps from Simulation 1 to get the median summary data frame of difference in `vegdist()` values. 
+
+Step 2: `cbind()` 
+
+I will join the `plot_num` data frame with the `dissim_dissim_diff_abun` data frame. 
+
+```{r}
+#cbind the 100 copies of the plot numbers into dissim_difference dataframe to id each row by its plot number
+dissim_diff_abund <- dissim_diff_abund %>%
+  #cbind() grafts the plot numbers to the right of the dissim df
+  cbind(plot = plot_rep$plot) %>%
+  #code below relocates the plot number columns to the left for readibility
+  relocate(plot, .after = n_trial)
+```
+
+Step 3: `aggregate`
+
+I now have all pairwise dissimilarity differences in one big data frame (1200 rows). I want to calculate the median difference in dissimilarity for each unique combination of plots. 
+
+i.e. I want the median value of the difference in dissimilarity between plot 1 and plot 2. 
+
+I will use the the `aggregate` function to achieve this. 
+
+```{r}
+dissim_median_abund <- aggregate(dissim_diff_abund, 
+          by = list(dissim_diff_abund$plot),
+          FUN = median) %>%
+  select(-Group.1, -n_trial)
+```
+
+Step 4:  `pivot_longer`
+
+To facilitate plotting the heatmap, I need to convert the wide format df to a long format data frame. In other words, I need to make the columns (currently plot numbers) into a single column titled, "plot"
+
+```{r}
+dissim_median_abund <- dissim_median_abund %>%
+  #since I will have two columns called plot (x & y axis), I will name each plot_1 and plot_2
+  rename(plot_1 = plot) %>%
+  pivot_longer(!plot_1, names_to = "plot_2", values_to = "dissim_diff") %>%
+  #change plot_2 from 'chr' to 'num'
+  mutate(plot_2 = as.numeric(plot_2))
+```
+
+
+### Heatmap (abudance-only prob)
+
+
+```{r}
+
+dissim_heatmap_abund <- ggplot(dissim_median_abund, 
+                         aes(x = factor(plot_1), 
+                             y = factor(plot_2), 
+                             fill = dissim_diff)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours = pal,
+                       limits = range(dissim_diff_median$dissim_diff)) + 
+  theme_classic() +
+  labs(x = "Plot",
+       y = "Plot",
+       fill = "Difference in dissimilarity") +
+  ggtitle("Difference in dissimilarity for observed and simulated plots \n (Abundance Per Plot Per Sp)") +
+  theme(axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_text(size = 20),
+        plot.title = element_text(size = 20),
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 20))
+
+range(dissim_diff_median$dissim_diff)
+```
+
+```{r fig.width = 8}
+dissim_heatmap_abund
+```
+
+
+The heatmap is mostly blue which suggests that this simulation is very close to the observed dissimilarity matrix. This is to be expected since I sample weights were taken from the abundance of each plot. When I run it 100 times, I should get a median result that is similar to the observed data.
+
+## Simulation 3: Abundance across all plots
+
+In this simulation, I will change the `est_probs` column of the `tree_probs` data frame yet again. This time I will use the probability taken from the abundance of a species across all plots. 
+
+```{r}
+ab_allplot_table <- inventory %>%
+  filter(type == "tree",
+         !spp %in% c("LURA", "SCHY", "random")) %>%
+  select(plot, spp) %>%
+  group_by(spp) %>%
+  summarise(tree_per_sp = n()) %>%
+  mutate(est_prob = tree_per_sp/sum(tree_per_sp)) %>%
+  ungroup()
+```
+
+`ab_allplot_table`: `est_prob` is calculated from `tree_per_sp` divided by the total number of trees in all plots.
+
+```{r fig.height = 5}
+ggtexttable(ab_allplot_table, 
+            theme = ttheme("light",
+                           base_size = 10, 
+                           padding = unit(c(10, 3.5),
+                                          "mm"))) %>%
+  tab_add_title(text = "ab_allplot_table data frame")
+
+rm(ab_allplot_table)
+```
+
+Next I will import this new `est_prob` value in the `tree_probs` data frame and plot the heatmap. I will do all this in one chunk since the process is similar to Simulation 2.
+
+```{r}
+#code is a repeat of the dataframe above. 
+abund_all_plot <- inventory %>%
+  filter(type == "tree",
+         !spp %in% c("LURA", "SCHY", "random")) %>%
+  select(plot, spp) %>%
+  group_by(spp) %>%
+  summarise(tree_per_sp = n()) %>%
+  mutate(est_prob = tree_per_sp/sum(tree_per_sp)) %>%
+  select(-tree_per_sp) %>%
+  rename(spp_prob = spp) %>%
+  ungroup()
+
+#left_join into tree_probs data frame
+abund_all_plot_2 <- tree_probs %>%
+  select(-est_prob) %>%
+  left_join(abund_all_plot)
+
+set.seed(5)
+
+dissim_diff_abund_2 <- map_df(1:100, ~dissim_func(abund_all_plot_2), .id = "n_trial")
+
+
+#add plot column
+dissim_diff_abund_2 <- dissim_diff_abund_2 %>%
+  #cbind() grafts the plot numbers to the right of the dissim df
+  cbind(plot = plot_rep$plot) %>%
+  #code below relocates the plot number columns to the left for readibility
+  relocate(plot, .after = n_trial)
+
+#aggregate
+dissim_median_abund_2 <- aggregate(dissim_diff_abund_2, 
+          by = list(dissim_diff_abund_2$plot),
+          FUN = median) %>%
+  select(-Group.1, -n_trial)
+
+#ggplot2 x/y column
+dissim_median_abund_2 <- dissim_median_abund_2 %>%
+  #since I will have two columns called plot (x & y axis), I will name each plot_1 and plot_2
+  rename(plot_1 = plot) %>%
+  pivot_longer(!plot_1, names_to = "plot_2", values_to = "dissim_diff") %>%
+  #change plot_2 from 'chr' to 'num'
+  mutate(plot_2 = as.numeric(plot_2))
+
+#ggplot2 code
+dissim_heatmap_abund_2 <- ggplot(dissim_median_abund_2, 
+                         aes(x = factor(plot_1), 
+                             y = factor(plot_2), 
+                             fill = dissim_diff)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours = pal) + 
+  theme_classic() +
+  labs(x = "Plot",
+       y = "Plot",
+       fill = "Difference in dissimilarity") +
+  ggtitle("Difference in dissimilarity between observed and simulated plots \n (Abundance Across All plots)") +
+  theme(axis.text.x = element_text(size = 20),
+        axis.text.y = element_text(size = 20),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_text(size = 20),
+        plot.title = element_text(size = 20),
+        legend.text = element_text(size = 17),
+        legend.title = element_text(size = 20))
+
+range(dissim_diff_median$dissim_diff)
+```
+
+```{r fig.width = 8}
+dissim_heatmap_abund_2
+```
+
+
+There are more red spots in the "abundance-across-all-plots" heat map than the "elevation & abundance" heatmap in simulation 1. This shows that using elevation and abundance better predicts the observed data. 
+
+### Adjust scales 
+
+of all three heatmaps to make comparison easier.
+
+Give original heatmap same range as the largest median range
+
+```{r}
+#put all the range of medians into a dataframe and just max min it
+df_name <- c("dissim_diff_median", "dissim_median_abund", "dissim_median_abund_2")
+
+min <- c(min(dissim_diff_median$dissim_diff),
+         min(dissim_median_abund$dissim_diff),
+         min(dissim_median_abund_2$dissim_diff))
+
+max <- c(max(dissim_diff_median$dissim_diff),
+         max(dissim_median_abund$dissim_diff),
+         max(dissim_median_abund_2$dissim_diff))
+
+median_range <- data.frame(df_name, min, max)
+
+#reassign heatmaps, add appropriate range
+dissim_heatmap <- dissim_heatmap +
+ scale_fill_gradientn(colors = pal,
+                      #i subset the median_range data frame to ignore the df_name column
+                      limits = range(median_range[,2:3]))
+
+dissim_heatmap_abund <- dissim_heatmap_abund +
+   scale_fill_gradientn(colors = pal,
+                      limits = range(median_range[,2:3]))
+
+dissim_heatmap_abund_2 <- dissim_heatmap_abund_2 + 
+     scale_fill_gradientn(colors = pal,
+                      limits = range(median_range[,2:3]))
+
+```
+
+## All three plots at a glance
+
+See pdf file under `nic_mangrove` folder on github for higher resolution image.
+
+```{r fig.width = 60, fig.height = 10}
+ggarrange(dissim_heatmap,
+                        dissim_heatmap_abund,
+                        dissim_heatmap_abund_2,
+                        #specify number of rows and columns
+                        nrow=1, ncol=3) 
+```
+
+## Export plots 
+
+Export heatmaps side by side
+
+```{r eval=FALSE}
+multi.page <- ggarrange(dissim_heatmap,
+                        dissim_heatmap_abund,
+                        dissim_heatmap_abund_2,
+                        #specify number of rows and columns
+                        nrow=1, ncol=3) 
+multi.page[[1]] 
+
+ggexport(multi.page, filename="dissim_heatmaps_2.pdf", width = 32, height = 8)
+```
+
+
+## Export data frames 
+
+```{r eval=FALSE}
+ggtext_theme <- ttheme(base_size = 20,
+                       padding = unit(c(10, 10), "mm"),
+             colnames.style = colnames_style(color = "white", fill = "#8cc257"),
+             tbody.style = tbody_style(color = "black", fill = c("#e8f3de", "#d3e8bb")))
+
+#^ copied from https://rpkgs.datanovia.com/ggpubr/reference/ggtexttable.html
+
+#do nested layout for second and third heatmaps 
+
+
+table_text_1 <- ggtexttable(tree_probs[1:10,],theme = ggtext_theme)
+table_text_2 <- ggtexttable(abund_plot_sp[1:10,])
+table_text_3 <- ggtexttable(abund_all_plot_2[1:10,])
+
+
+#add arrow from powerpoint
+#arrow <- 
+  
+#rasterGrob(readPNG("arrow.png"))
+
+
+```
+
+
+## Export plots + data frame
+
+in pdf format
+
+```{r eval=FALSE}
+
+nested_1 <- ggarrange(ggtexttable(tree_probs[1:10,],
+                                  theme = ggtext_theme) %>%
+                        table_cell_bg(tree_probs[1:10,], row = 1:10, column = 7, fill = "yellow") ,
+                      NULL,
+                      widths = c(2,1))
+nested_2 <- ggarrange(ggtexttable(abund_plot_sp[1:10,],
+                                  theme = ggtext_theme),
+                      ggtexttable(abund_prob[1:10,], 
+                                  theme = ggtext_theme), 
+                      nrow = 1,
+                      ncol = 2,
+                      widths = c(1,5))
+
+nested_3 <- ggarrange(ggtexttable(ab_allplot_table[1:10,],theme = ggtext_theme),
+                      ggtexttable(abund_all_plot_2[1:10,],theme = ggtext_theme),
+                      nrow = 1,
+                      ncol = 2,
+                      widths = c(1,2))
+
+bottom <- ggarrange(nested_1, nested_2, nested_3,
+                    nrow = 1)
+
+top <- ggarrange(dissim_heatmap,
+                        dissim_heatmap_abund,
+                        dissim_heatmap_abund_2,
+                 nrow = 1,
+                 ncol = 3)
+#export 
+multi_graphic <- ggarrange(top,
+                        bottom,
+                        nrow=2,
+                        align = "v")
+
+ggexport(multi_graphic, filename="multi_graphic.pdf", width = 40, height = 16)
+```
+
+# Misc. Exploration: 
+
+## Species Heat map
+
+Rank species according to elevation
+
+```{r}
+species_contribution <- species %>%
+ # select(species, nr_trees) %>%
+  left_join(sp_abundance_2) %>%
+  filter(!species %in% c("LURA", "SCHY")) %>%
+  rename(trees_per_species = nr_trees) %>%
+  relocate(plot, .before = species) %>%
+  arrange(plot) %>%
+  mutate(species_contribution = 100*(n_trees/trees_per_species)) %>%
+  mutate(species_contribution = round(species_contribution, digits = 1)) %>%
+  ungroup()
+
+```
+
+
+### data frame
+
+```{r}
+#heatmap data frame
+heatmap_df <- tree_probs %>%
+  filter(!spp_orig %in% c("LURA", "SCHY", "random")) %>%
+  group_by(treeid,
+           spp_orig,
+           elev_bin) %>%
+  #x = number of treeid replicates, will remove later
+  summarise(x = n()) %>%
+  arrange(treeid) %>%
+  select(treeid, spp_orig, elev_bin) %>%
+  group_by(spp_orig, elev_bin) %>%
+  summarise(tree_per_bin = n()) %>%
+  rename(species = spp_orig) %>%
+  ungroup()
+
+```
+
+### ggplot2
+
+```{r}
+#species heatmap with ggplot2
+ggplot(heatmap_df, aes(x = species, 
+                                 y = factor(elev_bin), 
+                                 fill = tree_per_bin)) +
+  #use geom_tile for heatmap, look into heatmap.2() function
+  geom_tile() +
+  coord_flip() + 
+  labs(x = "Species",
+       #issue: too many elevation bins, 431 of them
+       y = "Elevation Bin",
+       fill = "Species Abundance") + 
+  scale_fill_gradient(low="white", high="red") + 
+  theme_classic()
+
+#ggplot2 heat map ver 2.0
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+heatmap_v2 <- ggplot(heatmap_df, aes(x = elev_bin, y = species, fill = tree_per_bin)) +
+  geom_tile() + 
+  scale_fill_gradientn(colours = pal) + 
+  scale_x_discrete(expand = c(0, 0)) +
+  scale_y_discrete(expand = c(0, 0)) + 
+  coord_equal() +
+  theme_classic()
+```
+
+```{r export ggplot2 heatmap, eval=FALSE, include=FALSE}
+#export v2.0 to pdf
+ggexport(heatmap_v2, filename="heatmap_v2.pdf", width = 250, height = 10)
+```
+
+
+Using heatmaply
+```{r eval=FALSE, include=FALSE}
+heatmap_df2 <- heatmap_df %>% 
+  pivot_wider(names_from = elev_bin, 
+              values_from = tree_per_bin,
+              values_fill = 0)
+
+#species heat map with heatmaply
+heatmaply(heatmap_df2, 
+        dendrogram = "none",
+        col = heat,
+        xlab = "Elevation bin", 
+        ylab = "Species")
+```
+
+
+
+
+```{r junk code, eval=FALSE, include=FALSE}
++
+  labs(x = "Plot", 
+       y = "Number of trees",
+       fill = "Species") + 
+  coord_flip() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal") +
+  guides(fill=guide_legend(ncol = 16,byrow=TRUE)) 
+```
+
+
+## Plot vs elevation rank (w/ abundance)
+
+```{r}
+#exploratory bar plot of distribution of species per plot
+sp_plot <- ggplot(sp_abundance_2, aes(x = factor(plot), 
+                                      y = n_trees, 
+                                      #code below orders the plant species based on the elevation rank
+                                      fill = fct_reorder(species, rank, .desc = FALSE))) +
+  geom_col() +
+  labs(x = "Plot", 
+       y = "Number of trees",
+       fill = "Species") + 
+  coord_flip() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal") +
+  guides(fill=guide_legend(ncol = 16,byrow=TRUE)) 
+
+sp_plot
+
+```
+
+
+
+```{r fig.height = 20, fig.width = 20}
+#use species data frame which includes median elevation component
+
+order_plot <- ggplot(species[-c(1,2),], aes(x = est_median, y = reorder(spp, est_median))) +
+  geom_point(size = 3, col = "blue") +  # Use a larger dot
+  theme_bw() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_line(colour = "grey60", linetype = "dashed"),
+    axis.text.x = element_text(size = 20),
+    axis.text.y = element_text(size = 20),
+    axis.title.x = element_text(size = 20),
+    axis.title.y = element_text(size = 20),
+    plot.title = element_text(size = 20),
+  ) +
+  labs(x = "Estimated Median Elevation",
+       y = "Species of Tree") +
+  ggtitle("Order of trees along elevation gradient") +
+  scale_x_continuous(breaks=seq(0,400,10))
+
+#theme(axis.text.x = element_text(size = 20),
+#        axis.text.y = element_text(size = 20),
+#        axis.title.x = element_text(size = 20),
+#        axis.title.y = element_text(size = 20),
+#        plot.title = element_text(size = 20),
+#        legend.text = element_text(size = 20),
+#        legend.title = element_text(size = 20))
+
+order_plot
+
+```
+
+### Export plot
+
+```{r eval = FALSE}
+multi.page <- ggarrange(order_plot,
+                        sp_plot,
+                        #specify number of rows and columns
+                        nrow=2, ncol=1) 
+multi.page[[1]] 
+
+ggexport(multi.page, filename="elevation_plot.pdf", width = 16, height = 20)
+
+ggexport(order_plot, filename="elev_by_sp.pdf", width = 16, height = 12)
+```
+
+

@@ -1,0 +1,406 @@
+---
+title: "NMDS on Mangrove Plot Population"
+author: Nicholas Ko
+output: 
+ html_document:
+    toc : TRUE
+    toc_float: TRUE
+    number_sections: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Background
+
+This Rmd contains the NMDS exploration. The process is as such:
+
+1. Create a species abundance matrix. 
+
+2. Run the matrix through NMDS using the `metaMDS()` function from the `vegan` package.
+
+3. Plot the environmental gradient (median elevation in this case) into the NMDS
+
+4. Get scores from base plot so that I can plot the NMDS plot in ggplot2
+
+**Curious Note:**
+
+**The `metaMDS()` function supposedly gives the same output if you put in the distance matrix or the species abundance matrix.**
+
+**I tried to do so in section 3 and 4 respectively. However, I ended up with different NMDS plots. Further work can be done to figure out why this so. I suggest using metaMDS() on the species abundance matrix since most online tutorials teach you that.**
+
+I have also included some links embedded with in the chunks. They are links to the `vegan` package tutorial.
+
+
+**load libraries**
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(purrr)
+library(ggpubr)
+library(ggplot2)
+library(forcats)
+#To install ggvegan, run the two lines of code below. ggvegan is a package which converts vegan plots into ggplots
+
+#install.packages("remotes")
+#remotes::install_github("gavinsimpson/ggvegan")
+library(ggvegan)
+```
+
+
+**load data**
+
+```{r}
+obs       <- read_csv("heatmap_data/obs_hm.csv")
+pop1      <- read_csv("heatmap_data/pop1_hm.csv")
+pop3      <- read_csv("heatmap_data/pop3_hm.csv")
+pop1_diff <- read_csv("heatmap_data/pop1_diff_hm.csv")
+pop3_diff <- read_csv("heatmap_data/pop3_diff_hm.csv")
+```
+
+# Data Frames
+
+I will convert the long format data frames to wide format. 
+
+Standardise col names
+```{r}
+pop1_diff <- pop1_diff %>%
+  rename(dissim_val = dissim_diff)
+
+pop3_diff <- pop3_diff %>%
+  rename(dissim_val = dissim_diff)
+```
+
+
+Function
+
+```{r}
+load_hm <- function(x) {
+  x <- x %>% 
+    select(-X1) %>% 
+    pivot_wider(names_from = plot_2, values_from = dissim_val) %>%
+    ungroup() 
+  
+  x <- x %>%
+  select(-plot_1)
+}
+```
+
+
+pivot wider
+```{r}
+obs <- map_df(1, ~load_hm(obs))
+rownames(obs) <- c(1:11,15)
+
+pop1 <- map_df(1, ~load_hm(pop1))
+rownames(pop1) <- c(1:11,15)
+
+pop1_diff <- map_df(1, ~load_hm(pop1_diff))
+rownames(pop1_diff) <- c(1:11,15)
+
+pop3 <- map_df(1, ~load_hm(pop3))
+rownames(pop3) <- c(1:11,15)
+
+pop3_diff <- map_df(1, ~load_hm(pop3_diff))
+rownames(pop3_diff) <- c(1:11,15)
+```
+
+Test Script
+```{r eval=FALSE, include=FALSE}
+a1 <- vegdist(abundance_matrix)
+metaMDS(vegdist_test)
+
+#a1 <- vegdist(abundance_matrix*
+                
+matrix_1 <- matrix(rnorm(192), nrow = 12, ncol = 16)
+
+abundance_matrix*matrix_1
+
+a2 <- a1*matrix_1
+
+metaMDS(a2)
+```
+
+# NMDS on vegdist()
+
+```{r fig.height = 3.5}
+obs_nmds <- metaMDS(obs)
+ordiplot(obs_nmds, type = "t",
+     main = "Observed Abundance")
+
+#autoplot(obs_nmds)
+
+```
+
+
+# NMDS on species abundance matrix
+
+```{r}
+
+#https://ourcodingclub.github.io/tutorials/ordination/
+
+abundance_matrix       <- read_csv("heatmap_data/obs_matrix.csv")
+rownames(abundance_matrix) <- c(1:11,15)
+
+abundance_matrix <- abundance_matrix %>%
+  select(-X1)
+
+obs_nmds2 <- metaMDS((abundance_matrix))
+```
+
+Filter for tree ids I want (remove LURA, SCHY, random)
+```{r}
+tree_probs <- read_csv("processed_data/tree_probs_new.csv")
+
+#create data frame with elevation per species id
+trees <- tree_probs %>%
+  select(-spp_prob) %>%
+  group_by(treeid, plot, spp_orig, rel_elev) %>%
+  summarise(x = n()) %>%
+  filter(!spp_orig %in% c("LURA","SCHY", "random")) %>%
+  select(-x) %>%
+  ungroup()
+```
+
+Add environment data to ordinatio
+```{r}
+mangrove.env <- trees %>%
+  group_by(plot) %>%
+  summarise(med_elev = median(rel_elev)) %>%
+  ungroup()
+
+row.names(mangrove.env) <- mangrove.env$plot
+
+mangrove.env <- mangrove.env %>%
+  select(-plot)
+
+ef <- envfit(obs_nmds2, mangrove.env, permu = 999)
+```
+
+```{r}
+plot(obs_nmds2, 
+     type = "t", 
+     main = "Observed Species Abundance")
+plot(ef, cex = 0.6)
+```
+
+
+The plot above shows that NMDS1 could have potential to reflect the median elevation environmental gradient. Plots/species to the left have higher median elevation, right - lower median elevation. 
+
+## ggplot2
+
+Plot NMDS with arrows (ggplot2)
+
+```{r}
+#code taken from https://www.rpubs.com/RGrieger/545184
+#help from https://www.youtube.com/watch?v=OMrtxobDhrM&t=2308s
+
+#ggplot2
+site.scrs <- as.data.frame(scores(obs_nmds2, display = "sites")) #save NMDS results into dataframe
+site.scrs <- cbind(site.scrs, median_elev = mangrove.env$med_elev)
+
+#site scores
+site.scrs <- site.scrs %>%
+  mutate(plot = c(1:11,15))
+
+#species scores
+spp.scrs <- as.data.frame(scores(obs_nmds2, display = "species")) 
+
+spp.scrs <- spp.scrs %>%
+  mutate(species = rownames(spp.scrs))
+```
+
+```{r}
+#nmds plot in ggplot2
+p1 <- ggplot(site.scrs, aes(x=NMDS1, y=NMDS2, label = plot))+ 
+  geom_text() +
+  scale_x_continuous(breaks=seq(-1,2,0.1)) +
+  scale_y_continuous(breaks=seq(-1,4,0.1)) + 
+  theme(panel.background = element_rect(fill = NA, colour = "black", size = 1)) +
+  #xend and yend indicate where the arrows should end, IF you do plot arrows.
+  #ADD SPECIES
+  geom_segment(data = spp.scrs,
+               aes(x = 0, 
+                   xend=NMDS1, 
+                   y=  0, 
+                   yend=NMDS2, 
+                   label = species), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               colour = "grey10", 
+               #thickness of arrow
+               lwd=0.01) +
+  ggrepel::geom_text_repel(data = spp.scrs, 
+                           aes(x=NMDS1, 
+                               y=NMDS2, 
+                               label = species), 
+                           cex = 3, 
+                           direction = "both", 
+                           segment.size = 0.25, 
+                           color = "red") +
+  ggtitle("NMDS on observed population of trees")
+
+p1
+```
+
+
+```{r}
+#no arrows
+p2 <- ggplot(site.scrs, aes(x=NMDS1, y=NMDS2, label = plot))+ 
+  geom_text() +
+  scale_x_continuous(breaks=seq(-1,2,0.1)) +
+  scale_y_continuous(breaks=seq(-1,4,0.1)) + 
+  theme(panel.background = element_rect(fill = NA, colour = "black", size = 1)) +
+  #xend and yend indicate where the arrows should end, IF you do plot arrows.
+  #ADD SPECIES
+  geom_segment(data = spp.scrs,
+               aes(x = 0, 
+                   xend=NMDS1, 
+                   y=  0, 
+                   yend=NMDS2, 
+                   label = species), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               colour = "grey10", 
+               #thickness of arrow
+               lwd=0.01, 
+               alpha = 0) +
+  ggrepel::geom_text_repel(data = spp.scrs, 
+                           aes(x=NMDS1, 
+                               y=NMDS2, 
+                               label = species), 
+                           cex = 3, 
+                           direction = "both", 
+                           segment.size = 0.25, 
+                           color = "red",
+                           alpha = 0) +
+  ggtitle("NMDS on observed population of trees (no arrows)") 
+
+p2
+```
+
+
+```{r}
+#sites only
+p3 <- ggplot(site.scrs, aes(x=NMDS1, y=NMDS2, label = plot))+ 
+  geom_text(alpha = 0) +
+  scale_x_continuous(breaks=seq(-1,2,0.1)) +
+  scale_y_continuous(breaks=seq(-1,4,0.1)) + 
+  theme(panel.background = element_rect(fill = NA, colour = "black", size = 1)) +
+  #xend and yend indicate where the arrows should end, IF you do plot arrows.
+  #ADD SPECIES
+  geom_segment(data = spp.scrs,
+               aes(x = 0, 
+                   xend=NMDS1, 
+                   y=  0, 
+                   yend=NMDS2, 
+                   label = species), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               colour = "grey10", 
+               #thickness of arrow
+               lwd=0.01,
+               alpha = 0) +
+  ggrepel::geom_text_repel(data = spp.scrs, 
+                           aes(x=NMDS1, 
+                               y=NMDS2, 
+                               label = species), 
+                           cex = 3, 
+                           direction = "both", 
+                           segment.size = 0.25, 
+                           color = "red",
+                           alpha = 1) +
+  ggtitle("NMDS on observed population of trees")
+
+p3
+```
+
+```{r}
+#species only
+p4 <- ggplot(site.scrs, aes(x=NMDS1, y=NMDS2, label = plot))+ 
+  geom_text(alpha = 0) +
+  scale_x_continuous(breaks=seq(-1,2,0.1)) +
+  scale_y_continuous(breaks=seq(-1,4,0.1)) + 
+  theme(panel.background = element_rect(fill = NA, colour = "black", size = 1)) +
+  #xend and yend indicate where the arrows should end, IF you do plot arrows.
+  #ADD SPECIES
+  geom_segment(data = spp.scrs,
+               aes(x = 0, 
+                   xend=NMDS1, 
+                   y=  0, 
+                   yend=NMDS2, 
+                   label = species), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               colour = "grey10", 
+               #thickness of arrow
+               lwd=0.01) +
+  ggrepel::geom_text_repel(data = spp.scrs, 
+                           aes(x=NMDS1, 
+                               y=NMDS2, 
+                               label = species), 
+                           cex = 3, 
+                           direction = "both", 
+                           segment.size = 0.25, 
+                           color = "red") +
+  ggtitle("NMDS on observed population of trees")
+
+p4
+```
+
+Export NMDS plots
+```{r eval = FALSE}
+nmds.export <- ggarrange(p1,
+                         p2,
+                         p3,
+                         p4,
+                        nrow=4, ncol=1) 
+
+ggexport(nmds.export, filename="nmds_plots.pdf", width = 8, height = 25)
+```
+
+
+```{r}
+spp.scrs <- trees %>%
+  group_by(spp_orig) %>%
+  summarise(med_elev = median(rel_elev)) %>%
+  ungroup() %>%
+  rename(species = spp_orig) %>%
+  left_join(spp.scrs)
+
+ggplot(spp.scrs, aes(x=med_elev, y=NMDS1, label = species))+ 
+  geom_text()
+```
+
+Plot above shows some correlation between NMDS 1 and median elevation of tree species, with the exception of EXAG. This is because EXAG is a rare species (occurs in less than 5 plots).
+
+```{r}
+ggplot(site.scrs, aes(x=median_elev, y=NMDS1, label = plot))+ 
+  geom_text()
+```
+
+Plot above shows some corrrelation between NMDS1 and median elevation between plots, with the exception of plot 15. More investigation can be done to understand why plot 15 is an outlier. 
+
+# Distribution of environmental data
+
+For now the only environmental data I have is the elevation. 
+
+Exploration of environmental data
+
+The only environmental data I have at the moment is elevation data. 
+
+```{r}
+#distribution of elevation by plot 
+ggplot(trees, aes(x = factor(reorder(plot, rel_elev, FUN = median)), y = rel_elev)) +
+  geom_boxplot() +
+  labs(x = "Plot number", 
+       y = "Relative Elevation") +
+scale_y_continuous(breaks=seq(0,450,50)) +
+  ggtitle("Distribution of Elevation by Plots")
+
+#distribution of elevation by species
+ggplot(trees, aes(x = reorder(spp_orig, rel_elev, FUN = median), y = rel_elev)) +
+  geom_boxplot() +
+  labs(x = "Plot number", 
+       y = "Relative Elevation") +
+scale_y_continuous(breaks=seq(0,450,50)) +
+  ggtitle("Distribution of Elevation by Species")
+```
