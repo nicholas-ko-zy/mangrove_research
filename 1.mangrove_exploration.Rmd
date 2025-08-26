@@ -2,15 +2,13 @@
 title: "Exploring Species Variation"
 author: Nicholas Ko
 output: 
- html_document:
-    toc : TRUE
-    toc_float: TRUE
-    number_sections: TRUE
+ github_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
+
 
 NOTE: USE `set.seed(5)` for all random processes.
 
